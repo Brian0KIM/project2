@@ -9,11 +9,6 @@ from pybricks.tools import wait
 import config
 
 
-def _any_on_line(ref_l: int, ref_c: int, ref_r: int) -> bool:
-    thr = int(config.LINE_THRESHOLD)
-    return (int(ref_l) <= thr) or (int(ref_c) <= thr) or (int(ref_r) <= thr)
-
-
 def do_turn(robot, angle_deg: int) -> None:
     # Execute an in-place turn using the DriveBase.
     if int(angle_deg) == 0:
@@ -21,101 +16,176 @@ def do_turn(robot, angle_deg: int) -> None:
     robot.drive.turn(int(angle_deg))
 
 
-def _probe_branch(robot, turn_deg: int) -> bool:
+def _follow_for_ms(robot, follower, ms: int, speed: int) -> float:
     """
-    Probe whether a branch exists in a given direction.
-
-    Method:
-    - Turn partially toward the candidate direction
-    - Drive forward a small distance
-    - Check if the center sensor still sees the line
-    - Return to the original pose
+    Follow the line for a short time window and return the average turn_rate.
+    Positive means it tended to turn right.
     """
-    if int(turn_deg) != 0:
-        robot.drive.turn(int(turn_deg))
-        wait(30)
+    elapsed = 0
+    acc = 0.0
+    n = 0
+    while elapsed < int(ms):
+        ref_l = robot.left_color.reflection()
+        ref_r = robot.right_color.reflection()
+        tr = float(follower.compute_turn_rate(ref_l, ref_r))
+        robot.drive.drive(int(speed), tr)
+        acc += tr
+        n += 1
+        wait(int(config.CONTROL_LOOP_MS))
+        elapsed += int(config.CONTROL_LOOP_MS)
+    robot.drive.stop()
+    if n <= 0:
+        return 0.0
+    return acc / float(n)
 
-    robot.drive.straight(int(config.PROBE_FORWARD_MM))
-    wait(20)
-    ref_c = robot.center_color.reflection()
-    on_line = int(ref_c) <= int(config.LINE_THRESHOLD)
 
-    robot.drive.straight(-int(config.PROBE_FORWARD_MM))
-    wait(20)
-
-    if int(turn_deg) != 0:
-        robot.drive.turn(-int(turn_deg))
-        wait(30)
-
-    return on_line
-
-
-def handle_intersection(robot, follower) -> None:
+def _short_right_try(robot, follower) -> bool:
     """
-    Apply right-hand rule:
-    Right > Straight > Left > U-turn
+    Distinguish ㅏ/ㅓ type intersections by attempting a very short right turn.
+
+    If the robot keeps converging to the right branch after the attempt, return True.
+    Otherwise revert and treat it as straight.
     """
-    # Move into the intersection so probes are meaningful.
+    do_turn(robot, int(config.SHORT_RIGHT_TRY_DEG))
+    avg_tr = _follow_for_ms(robot, follower, int(config.SHORT_TRY_MS), speed=int(config.BASE_SPEED * 0.6))
+
+    # Heuristic: if we are still steering right significantly, we likely found a right branch.
+    if avg_tr > 30.0:
+        # Commit to full right turn (already turned partially).
+        remaining = int(config.TURN_RIGHT_DEG) - int(config.SHORT_RIGHT_TRY_DEG)
+        do_turn(robot, remaining)
+        return True
+
+    # Revert to original heading if it did not commit.
+    do_turn(robot, -int(config.SHORT_RIGHT_TRY_DEG))
+    return False
+
+
+def classify_intersection(robot, follower):
+    """
+    Classify intersection based on the described method:
+    - state==7(111) sustained => candidate (+ or T)
+    - advance slightly, then check:
+      - state==5(101) => T
+      - state==7(111) => +
+    Returns (kind, dir_array)
+    dir_array = [L, S, R] with 0/1.
+    """
     robot.drive.straight(int(config.INTERSECTION_ADVANCE_MM))
     robot.drive.stop()
     follower.reset_flags()
     wait(30)
 
-    probe_r = int(config.TURN_RIGHT_DEG * float(config.PROBE_TURN_FRACTION))
-    probe_l = int(config.TURN_LEFT_DEG * float(config.PROBE_TURN_FRACTION))
+    state = int(follower.state_from_sensors(robot))
+    if state == 7:
+        return "PLUS", [1, 1, 1]
+    if state == 5:
+        return "T", [1, 0, 1]
+    # Fallback: treat unknown as T-like.
+    return "T", [1, 0, 1]
 
-    right_ok = _probe_branch(robot, probe_r)
-    straight_ok = _probe_branch(robot, 0)
-    left_ok = _probe_branch(robot, probe_l)
 
-    if right_ok:
-        do_turn(robot, int(config.TURN_RIGHT_DEG))
-    elif straight_ok:
-        # Keep heading
-        pass
-    elif left_ok:
-        do_turn(robot, int(config.TURN_LEFT_DEG))
+def handle_intersection_dfs(robot, follower, dfs_stack, backtracking: bool):
+    """
+    DFS(backtracking) intersection handling.
+
+    - When exploring: push remaining options to stack.
+    - When backtracking: pop until an intersection with remaining options is found.
+      If none, keep going straight (continue backtracking).
+    Returns (last_dir, backtracking).
+    """
+    kind, dir_array = classify_intersection(robot, follower)
+
+    # Build options in priority order: Right -> Straight -> Left
+    options = []
+    if int(dir_array[2]) == 1:
+        options.append("R")
+    if int(dir_array[1]) == 1:
+        options.append("S")
+    if int(dir_array[0]) == 1:
+        options.append("L")
+
+    chosen = "S"
+    if backtracking:
+        # Skip finished intersections.
+        while dfs_stack and (not dfs_stack[-1]["options"]):
+            dfs_stack.pop()
+
+        if dfs_stack and dfs_stack[-1]["options"]:
+            chosen = dfs_stack[-1]["options"].pop(0)
+            backtracking = False
+        else:
+            # Continue backtracking: go straight through this intersection.
+            chosen = "S"
+            backtracking = True
     else:
-        do_turn(robot, int(config.TURN_UTURN_DEG))
+        if not options:
+            chosen = "B"
+            backtracking = True
+        else:
+            chosen = options.pop(0)
+            dfs_stack.append({"options": options})
 
-    # Exit the intersection before resuming normal line following.
+    last_dir = chosen
+
+    # Execute decision.
+    if chosen == "R":
+        # For T-like intersections, a short right attempt can distinguish ㅏ/ㅓ behavior.
+        if kind == "T":
+            committed = _short_right_try(robot, follower)
+            if not committed:
+                # Treat as straight if it did not commit.
+                last_dir = "S"
+        else:
+            do_turn(robot, int(config.TURN_RIGHT_DEG))
+    elif chosen == "L":
+        do_turn(robot, int(config.TURN_LEFT_DEG))
+    elif chosen == "B":
+        do_turn(robot, int(config.TURN_UTURN_DEG))
+    else:
+        # Straight: do nothing.
+        pass
+
     robot.drive.straight(int(config.EXIT_INTERSECTION_MM))
     robot.drive.stop()
     follower.reset_flags()
 
+    return last_dir, backtracking
 
-def recover_line(robot, follower) -> None:
+
+def recover_from_lost(robot, follower, last_dir: str) -> None:
     """
-    Simple lost-line recovery:
-    - Spin right for a while to search
-    - If not found, spin left
-    - If still not found, do a U-turn as a last resort
+    Lost-line recovery based on the last direction (last_dir).
+
+    - If last_dir was left, try turning left.
+    - If last_dir was right, try turning right.
+    - Otherwise, try backing up.
+    Repeat until the center sensor is BLACK again.
     """
     robot.drive.stop()
     follower.reset_flags()
 
-    def spin_search(turn_rate: int, duration_ms: int) -> bool:
-        elapsed = 0
-        while elapsed < duration_ms:
-            ref_l, ref_c, ref_r = robot.reflections()
-            if _any_on_line(ref_l, ref_c, ref_r):
-                robot.drive.stop()
-                follower.reset_flags()
-                return True
-            robot.drive.drive(0, int(turn_rate))
-            wait(int(config.CONTROL_LOOP_MS))
-            elapsed += int(config.CONTROL_LOOP_MS)
-        robot.drive.stop()
-        return False
+    attempts = 0
+    while not robot.center_is_black():
+        attempts += 1
+        if last_dir == "L":
+            robot.drive.drive(0, -160)
+            wait(140)
+            robot.drive.stop()
+        elif last_dir == "R":
+            robot.drive.drive(0, 160)
+            wait(140)
+            robot.drive.stop()
+        else:
+            robot.drive.straight(-30)
+            robot.drive.stop()
 
-    # Try right then left
-    if spin_search(turn_rate=160, duration_ms=800):
-        return
-    if spin_search(turn_rate=-160, duration_ms=1200):
-        return
+        wait(30)
 
-    # Last resort
-    do_turn(robot, int(config.TURN_UTURN_DEG))
-    follower.reset_flags()
+        # Safety fallback to avoid infinite looping.
+        if attempts >= 12:
+            do_turn(robot, int(config.TURN_UTURN_DEG))
+            attempts = 0
+            follower.reset_flags()
 
 

@@ -44,10 +44,9 @@ class Robot:
     # ------------------------------
 
     def reflections(self):
-        # Returns reflections (0..100) from left/center/right sensors.
+        # Returns reflections (0..100) from left/right sensors.
         return (
             self.left_color.reflection(),
-            self.center_color.reflection(),
             self.right_color.reflection(),
         )
 
@@ -59,9 +58,24 @@ class Robot:
             self.right_color.color(),
         )
 
-    def any_blue(self) -> bool:
-        l, c, r = self.colors()
-        return (l == Color.BLUE) or (c == Color.BLUE) or (r == Color.BLUE)
+    def center_color_classified(self) -> Color:
+        """
+        Center sensor is used in Color mode.
+        To reduce false positives, only BLACK/RED/GREEN are trusted; everything else becomes WHITE.
+        """
+        c = self.center_color.color()
+        if c in config.CENTER_TRUSTED_COLORS:
+            return c
+        return Color.WHITE
+
+    def center_is_black(self) -> bool:
+        return self.center_color_classified() == Color.BLACK
+
+    def center_is_red(self) -> bool:
+        return self.center_color_classified() == Color.RED
+
+    def center_is_green(self) -> bool:
+        return self.center_color_classified() == Color.GREEN
 
     def distance_mm(self) -> int:
         # UltrasonicSensor.distance() returns mm in Pybricks.

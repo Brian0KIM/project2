@@ -5,6 +5,7 @@ All comments are intentionally in English (per user rule).
 """
 
 from pybricks.parameters import Port
+from pybricks.parameters import Color
 
 # ------------------------------
 # Ports (as provided by the user)
@@ -61,23 +62,21 @@ MIN_LINE_STRENGTH = 0.12
 CONTROL_LOOP_MS = 10
 
 # ------------------------------
-# Junction / dead-end detection (tune)
+# State machine timing (tune)
 # ------------------------------
 
-# How long the junction condition must persist before being accepted.
+# How long state==7(111) must persist before being accepted as an intersection candidate.
 INTERSECTION_CONFIRM_MS = 70
 
-# How long "line lost" must persist before triggering recovery.
+# How long state==0(000) must persist before triggering the lost-line recovery.
 LOST_CONFIRM_MS = 130
+
+# ------------------------------
+# Intersection classification / maneuvers (tune)
+# ------------------------------
 
 # Extra movement into the junction before deciding available directions.
 INTERSECTION_ADVANCE_MM = 45
-
-# Probe distance used to test whether a branch exists.
-PROBE_FORWARD_MM = 35
-
-# Use a fraction of the full turn for probing (e.g., 0.4 * 90deg ≈ 36deg).
-PROBE_TURN_FRACTION = 0.4
 
 # After selecting a direction at an intersection, move forward to exit it.
 EXIT_INTERSECTION_MM = 25
@@ -86,6 +85,32 @@ EXIT_INTERSECTION_MM = 25
 TURN_RIGHT_DEG = 90
 TURN_LEFT_DEG = -90
 TURN_UTURN_DEG = 180
+
+# A very short right attempt used to distinguish ㅏ/ㅓ type intersections.
+SHORT_RIGHT_TRY_DEG = 25
+SHORT_TRY_FORWARD_MM = 35
+SHORT_TRY_MS = 250
+
+# ------------------------------
+# Center sensor (Color mode) classification
+# ------------------------------
+
+# Only these colors are trusted; everything else is treated as WHITE to reduce false positives.
+CENTER_TRUSTED_COLORS = (Color.BLACK, Color.RED, Color.GREEN)
+
+# ------------------------------
+# Node / finish behavior
+# ------------------------------
+
+# Debounce for RED node detection to avoid multiple counts.
+NODE_DEBOUNCE_MS = 900
+
+# If True, do a U-turn after processing a RED node (dead-end node behavior).
+AUTO_UTURN_ON_NODE = True
+
+# ------------------------------
+# Ultrasonic pickup / drop behavior
+# ------------------------------
 
 # ------------------------------
 # Blue node behavior
@@ -114,7 +139,7 @@ PICKUP_DISTANCE_MM = 85
 PICKUP_CONFIRM_COUNT = 3
 
 # Drop behavior: drop the carried object on the first blue node after pickup.
-DROP_ON_FIRST_BLUE = True
+DROP_ON_NODE_RED = True
 
 # ------------------------------
 # Gripper configuration (tune)

@@ -1,5 +1,5 @@
 """
-Line following + simple situation detection (intersection / lost line).
+State-based line following + situation detection (intersection / lost line).
 
 All comments are intentionally in English (per user rule).
 """
@@ -7,35 +7,24 @@ All comments are intentionally in English (per user rule).
 from pybricks.tools import StopWatch
 
 import config
-from utils import clamp
 
 
-def _blackness_from_reflection(ref: int) -> float:
-    """
-    Convert reflection (0..100) into blackness (0..1),
-    using REFLECTION_BLACK_MAX/REFLECTION_WHITE_MIN as calibration anchors.
-    """
-    black = float(config.REFLECTION_BLACK_MAX)
-    white = float(config.REFLECTION_WHITE_MIN)
-    if white <= black:
-        # Avoid division by zero if misconfigured.
-        return 0.0
-    # Normalize reflection into [0..1] whiteness, then invert to blackness.
-    whiteness = clamp((float(ref) - black) / (white - black), 0.0, 1.0)
-    return 1.0 - whiteness
+def _is_black_reflection(ref: int) -> bool:
+    # Reflection thresholding for left/right sensors.
+    return int(ref) <= int(config.LINE_THRESHOLD)
 
 
 class LineFollower:
     def __init__(self):
         self._sw = StopWatch()
-        self._intersection_ms = 0
-        self._lost_ms = 0
+        self._state0_ms = 0
+        self._state7_ms = 0
         self._last_t = self._sw.time()
 
     def reset_flags(self) -> None:
         # Reset detection timers to avoid immediate re-trigger after a maneuver.
-        self._intersection_ms = 0
-        self._lost_ms = 0
+        self._state0_ms = 0
+        self._state7_ms = 0
         self._last_t = self._sw.time()
 
     def _dt_ms(self) -> int:
@@ -52,48 +41,59 @@ class LineFollower:
     def on_line(self, ref: int) -> bool:
         return int(ref) <= int(config.LINE_THRESHOLD)
 
-    def compute_turn_rate(self, ref_l: int, ref_c: int, ref_r: int) -> float:
-        # Weighted blackness position estimate: left=-1, center=0, right=+1.
-        bl = _blackness_from_reflection(ref_l)
-        bc = _blackness_from_reflection(ref_c)
-        br = _blackness_from_reflection(ref_r)
-
-        strength = bl + bc + br
-        if strength < config.MIN_LINE_STRENGTH:
-            # If line strength is too low, do not steer aggressively.
-            return 0.0
-
-        pos = (br - bl) / strength  # -1..+1 approximately
-        return float(config.KP_TURN) * pos
-
-    def update_flags(self, ref_l: int, ref_c: int, ref_r: int):
+    def compute_turn_rate(self, ref_l: int, ref_r: int) -> float:
         """
-        Update internal timers and return (is_intersection, is_lost).
+        Line following uses only left/right reflection for stability.
+        Positive turn_rate means turning right.
+        """
+        # Normalize the error to roughly [-1, +1] using calibrated range.
+        black = float(config.REFLECTION_BLACK_MAX)
+        white = float(config.REFLECTION_WHITE_MIN)
+        span = max(1.0, white - black)
 
-        - Intersection: center is on line AND at least one side is also on line.
-        - Lost: all sensors are off line.
+        nl = (float(ref_l) - black) / span
+        nr = (float(ref_r) - black) / span
+
+        # If right is "whiter" than left, we are drifting left => steer right (positive).
+        error = nr - nl
+        return float(config.KP_TURN) * error
+
+    def state_from_sensors(self, robot) -> int:
+        """
+        3-bit state from (left_black, center_black, right_black) => 0..7.
+        Bits: [L, C, R] = [bit2, bit1, bit0]
+        """
+        ref_l = robot.left_color.reflection()
+        ref_r = robot.right_color.reflection()
+        l = 1 if _is_black_reflection(ref_l) else 0
+        c = 1 if robot.center_is_black() else 0
+        r = 1 if _is_black_reflection(ref_r) else 0
+        return (l << 2) | (c << 1) | r
+
+    def update_flags_from_state(self, state: int):
+        """
+        Update internal timers and return (is_intersection_candidate, is_lost).
+
+        - Intersection candidate: state==7 (111) sustained.
+        - Lost: state==0 (000) sustained.
         """
         dt = self._dt_ms()
 
-        l_on = self.on_line(ref_l)
-        c_on = self.on_line(ref_c)
-        r_on = self.on_line(ref_r)
+        is_state7 = int(state) == 7
+        is_state0 = int(state) == 0
 
-        is_intersection_now = c_on and (l_on or r_on)
-        is_lost_now = (not l_on) and (not c_on) and (not r_on)
-
-        if is_intersection_now:
-            self._intersection_ms += dt
+        if is_state7:
+            self._state7_ms += dt
         else:
-            self._intersection_ms = 0
+            self._state7_ms = 0
 
-        if is_lost_now:
-            self._lost_ms += dt
+        if is_state0:
+            self._state0_ms += dt
         else:
-            self._lost_ms = 0
+            self._state0_ms = 0
 
-        is_intersection = self._intersection_ms >= int(config.INTERSECTION_CONFIRM_MS)
-        is_lost = self._lost_ms >= int(config.LOST_CONFIRM_MS)
+        is_intersection = self._state7_ms >= int(config.INTERSECTION_CONFIRM_MS)
+        is_lost = self._state0_ms >= int(config.LOST_CONFIRM_MS)
 
         return is_intersection, is_lost
 
